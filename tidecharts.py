@@ -23,7 +23,7 @@ NOAA_REQUEST_HEADERS = {
 STATIC_NOAA_STATIONS = {
     "8423898": {"name": "Fort Point, New Hampshire", "state": "NH"},
     "8418150": {"name": "Portland, Maine", "state": "ME"},
-    "8534720": {"name": "Boston, Massachusetts", "state": "MA"},
+    "8443970": {"name": "Boston, Massachusetts", "state": "MA"},
     "8419317": {"name": "Gloucester, Massachusetts", "state": "MA"},
     "8419319": {"name": "Newburyport, Massachusetts", "state": "MA"},
 }
@@ -82,7 +82,7 @@ def fetch_noaa_stations():
             _station_cache = STATIC_NOAA_STATIONS.copy()
             return _station_cache
 
-        today = datetime.utcnow().date()
+        today = datetime.now().date()
         check_date = today.strftime('%Y%m%d')
 
         valid_stations = {}
@@ -103,7 +103,8 @@ def fetch_noaa_stations():
             valid_stations = STATIC_NOAA_STATIONS.copy()
 
         _station_cache = valid_stations
-    except requests.exceptions.RequestException:
+    except requests.exceptions.RequestException as e:
+        print(f"[tidecharts] WARNING: Failed to fetch NOAA station metadata: {e}. Falling back to static station list.")
         _station_cache = STATIC_NOAA_STATIONS.copy()
 
     return _station_cache
@@ -144,6 +145,7 @@ def get_tides():
             'datum': 'MLLW',
             'units': units,
             'time_zone': 'gmt',
+            'interval': 'hilo',
             'format': 'json'
         }
         
