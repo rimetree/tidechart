@@ -1,4 +1,4 @@
-import os
+﻿import os
 from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
 import requests
@@ -14,11 +14,9 @@ NOAA_API_BASE = "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
 NOAA_STATIONS_METADATA_URL = "https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations.json?type=tidepredictions"
 ALLOWED_STATES = ["NH", "ME", "MA"]
 
-NOAA_REQUEST_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-    'Accept': 'application/json, text/plain, */*',
-    'Referer': 'https://tidesandcurrents.noaa.gov/',
-}
+# No custom headers needed - NOAA accepts the default python-requests user-agent.
+# Spoofed browser headers (User-Agent, Referer) cause 403 responses from NOAA.
+NOAA_REQUEST_HEADERS = {}
 
 STATIC_NOAA_STATIONS = {
     "8423898": {"name": "Fort Point, New Hampshire", "state": "NH"},
@@ -144,7 +142,7 @@ def get_tides():
             'product': 'predictions',
             'datum': 'MLLW',
             'units': units,
-            'time_zone': 'gmt',
+            'time_zone': 'lst_ldt',
             'interval': 'hilo',
             'format': 'json'
         }

@@ -261,30 +261,19 @@
       function formatPredictionTimeLocal(rawTime) {
         const parts = rawTime.split(' ');
         if (parts.length !== 2) return rawTime;
-        const [date, time] = parts;
-        const year = parseInt(date.slice(0, 4), 10);
-        const month = parseInt(date.slice(4, 6), 10) - 1;
-        const day = parseInt(date.slice(6, 8), 10);
+        const [, time] = parts;
         const [hour, minute] = time.split(':').map(value => parseInt(value, 10));
-        const utcDate = new Date(Date.UTC(year, month, day, hour, minute));
-        if (Number.isNaN(utcDate.getTime())) return time;
-        return utcDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        if (isNaN(hour) || isNaN(minute)) return time;
+        const d = new Date(2000, 0, 1, hour, minute);
+        return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       }
 
       function getLocalDateStringFromUTC(rawTime) {
+        // NOAA hilo timestamps are already in local time (lst_ldt): 'YYYY-MM-DD HH:MM'
+        // Just return the date portion directly.
         const parts = rawTime.split(' ');
         if (parts.length !== 2) return '';
-        const [date, time] = parts;
-        const year = parseInt(date.slice(0, 4), 10);
-        const month = parseInt(date.slice(4, 6), 10) - 1;
-        const day = parseInt(date.slice(6, 8), 10);
-        const [hour, minute] = time.split(':').map(value => parseInt(value, 10));
-        //const utcDate = new Date(Date.UTC(year, month, day, hour, minute));
-        const utcDate = new Date(Date(year, month, day, hour, minute));
-        const localYear = utcDate.getFullYear();
-        const localMonth = String(utcDate.getMonth() + 1).padStart(2, '0');
-        const localDay = String(utcDate.getDate()).padStart(2, '0');
-        return `${localYear}-${localMonth}-${localDay}`;
+        return parts[0];
       }
 
       function filterPredictionsByDate(predictions, dateString) {
@@ -460,6 +449,45 @@
         return { high, low };
       }
 
+      function findDailyHighsLows(predictions) {
+        // If the data already comes tagged as discrete hi/lo events (NOAA's
+        // interval=hilo response includes a type of 'H' or 'L' per point),
+        // trust it directly rather than guessing from neighboring points.
+        if (predictions.length && predictions[0].type) {
+          const highs = predictions
+            .filter(p => p.type === 'H')
+            .map(p => ({ ...p, value: parseFloat(p.v) }));
+          const lows = predictions
+            .filter(p => p.type === 'L')
+            .map(p => ({ ...p, value: parseFloat(p.v) }));
+          return { highs, lows };
+        }
+
+        // Fallback for dense, untagged curve data: detect local extrema.
+        // Edge points are included (compared only to the neighbor that
+        // exists) so the first/last tide event of the day isn't dropped.
+        const highs = [];
+        const lows = [];
+
+        for (let i = 0; i < predictions.length; i++) {
+          const curr = parseFloat(predictions[i].v);
+          if (isNaN(curr)) continue;
+
+          const prev = i > 0 ? parseFloat(predictions[i - 1].v) : null;
+          const next = i < predictions.length - 1 ? parseFloat(predictions[i + 1].v) : null;
+          if (prev !== null && isNaN(prev)) continue;
+          if (next !== null && isNaN(next)) continue;
+
+          const isHigh = (prev === null || curr > prev) && (next === null || curr > next);
+          const isLow = (prev === null || curr < prev) && (next === null || curr < next);
+
+          if (isHigh) highs.push({ ...predictions[i], value: curr });
+          if (isLow) lows.push({ ...predictions[i], value: curr });
+        }
+
+        return { highs, lows };
+      }
+
       function createChart(predictions, units) {
         const chartId = 'tideChart';
         return `
@@ -538,8 +566,21 @@
           return;
         }
 
-        const { high, low } = findHighLow(predictions);
+        const { highs, lows } = findDailyHighsLows(predictions);
         const unitLabel = units === 'metric' ? 'm' : 'ft';
+
+        const allTides = [
+          ...highs.map(h => ({ ...h, type: 'High tide' })),
+          ...lows.map(l => ({ ...l, type: 'Low tide' })),
+        ].sort((a, b) => a.t.localeCompare(b.t));
+
+        const tideRows = allTides.map(tide => `
+          <tr>
+            <td>${tide.type}</td>
+            <td>${formatPredictionTimeLocal(tide.t)}</td>
+            <td>${parseFloat(tide.v).toFixed(2)}</td>
+          </tr>
+        `).join('');
 
         let summaryHtml = `
           <div>
@@ -553,16 +594,7 @@
                 </tr>
               </thead>
               <tbody>
-                <tr>
-                  <td>High tide</td>
-                  <td>${high ? formatPredictionTimeLocal(high.t) : 'N/A'}</td>
-                  <td>${high ? parseFloat(high.v).toFixed(2) : 'N/A'}</td>
-                </tr>
-                <tr>
-                  <td>Low tide</td>
-                  <td>${low ? formatPredictionTimeLocal(low.t) : 'N/A'}</td>
-                  <td>${low ? parseFloat(low.v).toFixed(2) : 'N/A'}</td>
-                </tr>
+                ${tideRows || '<tr><td colspan="3">No high/low tides found for this date.</td></tr>'}
               </tbody>
             </table>
           </div>
@@ -588,8 +620,8 @@
 
         const beginDate = dateValue.replace(/-/g, '');
         const endDate = beginDate;
-        const url = `/api/tides?station=${encodeURIComponent(station)}&begin_date=${beginDate}&end_date=${endDate}&units=${encodeURIComponent(units)}`;
-
+        const url = `/api/tides?station=`+encodeURIComponent(station)+`&begin_date=${beginDate}&end_date=${endDate}&units=`+encodeURIComponent(units);
+        //const url = `/api/tides?date=today&station=${encodeURIComponent(station)}&product=predictions&datum=MLLW&time_zone=lst_ldt&interval=hilo&units=english&format=json`;
         try {
           loadButton.disabled = true;
           loadButton.textContent = 'Loading...';
