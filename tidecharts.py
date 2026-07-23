@@ -5,6 +5,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 import json
+import time
 
 app = Flask(__name__)
 CORS(app)
@@ -18,6 +19,12 @@ ALLOWED_STATES = ["NH", "ME", "MA"]
 # Spoofed browser headers (User-Agent, Referer) cause 403 responses from NOAA.
 NOAA_REQUEST_HEADERS = {}
 
+# NOAA intermittently returns a 403 (and occasionally 429/5xx) even for
+# perfectly valid, unthrottled requests - it seems to be transient flakiness
+# on their end rather than a real permissions problem, and simply retrying
+# clears it almost every time. These statuses are treated as retryable.
+NOAA_RETRYABLE_STATUSES = {403, 429, 500, 502, 503, 504}
+
 STATIC_NOAA_STATIONS = {
     "8423898": {"name": "Fort Point, New Hampshire", "state": "NH"},
     "8418150": {"name": "Portland, Maine", "state": "ME"},
@@ -27,6 +34,51 @@ STATIC_NOAA_STATIONS = {
 }
 
 _station_cache = None
+
+
+def fetch_noaa_json(url, params=None, max_attempts=5, request_timeout=8, base_backoff=0.5, max_backoff=6):
+    """
+    GET a NOAA endpoint, retrying with exponential backoff on transient
+    failures (network errors, and the retryable status codes above,
+    including the occasional 403). Returns (data, error_message, status_code):
+    on success error_message is None; on final failure data is None and
+    error_message/status_code describe what went wrong.
+    """
+    last_error = None
+    last_status = 502
+
+    for attempt in range(max_attempts):
+        try:
+            response = requests.get(url, params=params, headers=NOAA_REQUEST_HEADERS, timeout=request_timeout)
+        except requests.exceptions.RequestException as e:
+            last_error = str(e)
+            last_status = 502
+        else:
+            if response.status_code == 200:
+                try:
+                    return response.json(), None, 200
+                except ValueError:
+                    last_error = 'Invalid (non-JSON) response from NOAA'
+                    last_status = 502
+            elif response.status_code in NOAA_RETRYABLE_STATUSES:
+                last_error = f'NOAA returned HTTP {response.status_code}'
+                last_status = response.status_code
+            else:
+                # Non-transient client error (e.g. bad params) - fail fast, no point retrying.
+                try:
+                    data = response.json()
+                    message = data.get('error', {}).get('message') if isinstance(data, dict) else None
+                    if not message:
+                        message = data.get('message') if isinstance(data, dict) else response.text
+                except ValueError:
+                    message = response.text
+                return None, message or f'NOAA request failed with status {response.status_code}', response.status_code
+
+        if attempt < max_attempts - 1:
+            sleep_for = min(base_backoff * (2 ** attempt), max_backoff)
+            time.sleep(sleep_for)
+
+    return None, last_error or 'NOAA request failed after multiple retries', last_status
 
 @app.route('/')
 def index():
@@ -44,14 +96,10 @@ def station_has_predictions(station_id, date_to_check):
         'begin_date': date_to_check,
         'end_date': date_to_check
     }
-    try:
-        response = requests.get(NOAA_API_BASE, params=params, headers=NOAA_REQUEST_HEADERS, timeout=10)
-        if response.status_code != 200:
-            return False
-        data = response.json()
-        return 'predictions' in data and bool(data['predictions'])
-    except (requests.exceptions.RequestException, ValueError):
+    data, error_message, _ = fetch_noaa_json(NOAA_API_BASE, params=params, max_attempts=3)
+    if error_message:
         return False
+    return 'predictions' in data and bool(data['predictions'])
 
 
 def fetch_noaa_stations():
@@ -59,10 +107,13 @@ def fetch_noaa_stations():
     if _station_cache is not None:
         return _station_cache
 
+    data, error_message, _ = fetch_noaa_json(NOAA_STATIONS_METADATA_URL, max_attempts=3)
+    if error_message:
+        print(f"[tidecharts] WARNING: Failed to fetch NOAA station metadata: {error_message}. Falling back to static station list.")
+        _station_cache = STATIC_NOAA_STATIONS.copy()
+        return _station_cache
+
     try:
-        response = requests.get(NOAA_STATIONS_METADATA_URL, headers=NOAA_REQUEST_HEADERS, timeout=10)
-        response.raise_for_status()
-        data = response.json()
         state_rank = {state: idx for idx, state in enumerate(ALLOWED_STATES)}
         items = []
 
@@ -101,8 +152,8 @@ def fetch_noaa_stations():
             valid_stations = STATIC_NOAA_STATIONS.copy()
 
         _station_cache = valid_stations
-    except requests.exceptions.RequestException as e:
-        print(f"[tidecharts] WARNING: Failed to fetch NOAA station metadata: {e}. Falling back to static station list.")
+    except Exception as e:
+        print(f"[tidecharts] WARNING: Failed to parse NOAA station metadata: {e}. Falling back to static station list.")
         _station_cache = STATIC_NOAA_STATIONS.copy()
 
     return _station_cache
@@ -134,42 +185,31 @@ def get_tides():
     except ValueError:
         return jsonify({'error': 'Invalid date format'}), 400
 
-    try:
-        params = {
-            'station': station,
-            'begin_date': request_begin_date,
-            'end_date': request_end_date,
-            'product': 'predictions',
-            'datum': 'MLLW',
-            'units': units,
-            'time_zone': 'lst_ldt',
-            'interval': 'hilo',
-            'format': 'json'
-        }
-        
-        response = requests.get(NOAA_API_BASE, params=params, headers=NOAA_REQUEST_HEADERS, timeout=10)
-        try:
-            data = response.json()
-        except ValueError:
-            return jsonify({'error': 'Invalid response from NOAA'}), 502
-        
-        if response.status_code != 200:
-            error_message = data.get('error', {}).get('message') if isinstance(data, dict) else None
-            if not error_message:
-                error_message = data.get('message') if isinstance(data, dict) else response.text
-            return jsonify({'error': f'NOAA request failed: {error_message}'}), response.status_code
-        
-        if 'predictions' in data:
-            return jsonify({
-                'station': stations[station],
-                'station_id': station,
-                'predictions': data['predictions']
-            })
-        else:
-            return jsonify({'error': 'No tide predictions available for this station/date.'}), 404
-            
-    except requests.exceptions.RequestException as e:
-        return jsonify({'error': f'NOAA request failed: {e}'}), 502
+    params = {
+        'station': station,
+        'begin_date': request_begin_date,
+        'end_date': request_end_date,
+        'product': 'predictions',
+        'datum': 'MLLW',
+        'units': units,
+        'time_zone': 'lst_ldt',
+        'interval': 'hilo',
+        'format': 'json'
+    }
+
+    data, error_message, status_code = fetch_noaa_json(NOAA_API_BASE, params=params, max_attempts=5)
+
+    if error_message:
+        return jsonify({'error': f'NOAA request failed: {error_message}'}), status_code
+
+    if 'predictions' in data:
+        return jsonify({
+            'station': stations[station],
+            'station_id': station,
+            'predictions': data['predictions']
+        })
+    else:
+        return jsonify({'error': 'No tide predictions available for this station/date.'}), 404
 
 @app.route('/api/favorites', methods=['GET', 'POST', 'DELETE'])
 def manage_favorites():

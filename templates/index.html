@@ -62,11 +62,40 @@
       .station-section {
         margin-top: 24px;
       }
+      .bg-layer {
+        position: fixed;
+        inset: 0;
+        z-index: -1;
+        background-size: cover;
+        background-position: center;
+        background-repeat: no-repeat;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 150ms ease;
+      }
       .station-grid {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
         gap: 16px;
         margin-top: 16px;
+      }
+      .scrollable-grid {
+        max-height: 360px;
+        overflow-y: auto;
+        padding-right: 6px;
+      }
+      details.station-section > summary {
+        cursor: pointer;
+        font-size: 1.1rem;
+        font-weight: 600;
+        color: #1a202c;
+        padding: 4px 0;
+      }
+      details.station-section > summary::marker {
+        color: #1161d1;
+      }
+      details.station-section[open] > summary {
+        margin-bottom: 4px;
       }
       .station-card {
         position: relative;
@@ -178,15 +207,12 @@
     </style>
   </head>
   <body>
+    <div id="bgLayer" class="bg-layer"></div>
     <div class="container">
       <h1>Tide Charts</h1>
       <p>Search stations, flag favorites, and use the top New England stations for quick tide lookup.</p>
 
-      <div class="form-row row-2">
-        <div>
-          <label for="stationSearch">Search stations</label>
-          <input type="search" id="stationSearch" placeholder="Search by name or state" />
-        </div>
+      <div class="form-row">
         <div>
           <label for="station">Selected station</label>
           <select id="station"></select>
@@ -212,13 +238,20 @@
       </div>
 
       <div class="station-section" id="favoritesSection"></div>
-      <div class="station-section" id="stationCardsSection">
-        <div class="section-title">
-          <h2>Featured stations</h2>
-          <span class="small-note">Showing up to 5 stations.</span>
+
+      <details class="station-section" id="allStationsDetails">
+        <summary>Browse all stations</summary>
+        <div class="form-row" style="margin-top: 16px;">
+          <div>
+            <label for="stationSearch">Search stations</label>
+            <input type="search" id="stationSearch" placeholder="Search by name or state" />
+          </div>
         </div>
-        <div class="station-grid" id="stationCards"></div>
-      </div>
+        <div class="section-title" style="margin-top: 12px;">
+          <span class="small-note" id="stationCountNote">Showing all matching stations.</span>
+        </div>
+        <div class="station-grid scrollable-grid" id="stationCards"></div>
+      </details>
 
       <div class="results" id="results"></div>
       <div class="error" id="error"></div>
@@ -230,6 +263,7 @@
       const stationSearch = document.getElementById('stationSearch');
       const favoritesSection = document.getElementById('favoritesSection');
       const stationCards = document.getElementById('stationCards');
+      const bgLayer = document.getElementById('bgLayer');
       const dateInput = document.getElementById('date');
       const unitsSelect = document.getElementById('units');
       const loadButton = document.getElementById('loadTides');
@@ -242,7 +276,22 @@
       let favoriteStationIds = [];
       const defaultStationId = '8423898';
       const topStates = ['NH', 'ME', 'MA'];
-      const maxVisibleStations = 5;
+
+      // --- Site owner config ---------------------------------------------
+      // Edit these two values to set the page background. Not exposed to
+      // site visitors — this is a code-level setting only.
+      //
+      // SITE_BACKGROUND_IMAGE_URL accepts either:
+      //   - A path to a file you host yourself, e.g. '/static/beach.jpg'
+      //     (put the file in a `static/` folder next to tidecharts.py —
+      //     Flask serves anything in there automatically at that path).
+      //   - A full external URL, e.g. 'https://example.com/beach.jpg'
+      //     (must be a direct link to the image file itself, not a page
+      //     that merely displays the image — see notes below).
+      // Leave it as '' for no background image.
+      const SITE_BACKGROUND_IMAGE_URL = '/static/background.jpeg';
+      // 0 = fully invisible, 1 = fully opaque.
+      const SITE_BACKGROUND_OPACITY = 0.3;
 
       function formatDate(date) {
         const yyyy = date.getFullYear();
@@ -311,7 +360,7 @@
           const text = `${station.name} ${station.state}`.toLowerCase();
           return !normalized || text.includes(normalized);
         });
-        return sortStationIds(ids).slice(0, maxVisibleStations);
+        return sortStationIds(ids);
       }
 
       function renderStationOptions() {
@@ -328,33 +377,42 @@
         }
       }
 
+      function buildStationCard(id) {
+        const station = allStations[id];
+        const isFavorited = favoriteStationIds.includes(id);
+        const card = document.createElement('div');
+        card.className = 'station-card' + (selectedStation === id ? ' selected' : '');
+        card.innerHTML = `
+          <button type="button" class="favorite-button ${isFavorited ? 'favorited' : ''}" title="Toggle favorite">${isFavorited ? '★' : '☆'}</button>
+          <h3>${station.name}</h3>
+          <p>${station.state}</p>
+          <p>ID: ${id}</p>
+        `;
+
+        card.addEventListener('click', event => {
+          if (event.target.closest('button')) return;
+          selectStation(id);
+        });
+
+        const button = card.querySelector('button');
+        button.addEventListener('click', event => {
+          event.stopPropagation();
+          toggleFavorite(id);
+        });
+
+        return card;
+      }
+
       function renderStationCards(filter = '') {
         stationCards.innerHTML = '';
         const stationIds = getFilteredStationIds(filter);
+        const countNote = document.getElementById('stationCountNote');
+        if (countNote) {
+          countNote.textContent = `Showing ${stationIds.length} matching station${stationIds.length === 1 ? '' : 's'}.`;
+        }
 
         stationIds.forEach(id => {
-          const station = allStations[id];
-          const card = document.createElement('div');
-          card.className = 'station-card' + (selectedStation === id ? ' selected' : '');
-          card.innerHTML = `
-            <button type="button" class="favorite-button ${favoriteStationIds.includes(id) ? 'favorited' : ''}" title="Toggle favorite">${favoriteStationIds.includes(id) ? '★' : '☆'}</button>
-            <h3>${station.name}</h3>
-            <p>${station.state}</p>
-            <p>ID: ${id}</p>
-          `;
-
-          card.addEventListener('click', event => {
-            if (event.target.closest('button')) return;
-            selectStation(id);
-          });
-
-          const button = card.querySelector('button');
-          button.addEventListener('click', event => {
-            event.stopPropagation();
-            toggleFavorite(id);
-          });
-
-          stationCards.appendChild(card);
+          stationCards.appendChild(buildStationCard(id));
         });
       }
 
@@ -368,27 +426,9 @@
         const grid = document.createElement('div');
         grid.className = 'station-grid';
 
-        favoriteStationIds.slice(0, maxVisibleStations).forEach(id => {
+        favoriteStationIds.forEach(id => {
           if (!allStations[id]) return;
-          const station = allStations[id];
-          const card = document.createElement('div');
-          card.className = 'station-card' + (selectedStation === id ? ' selected' : '');
-          card.innerHTML = `
-            <button type="button" class="favorite-button favorited" title="Toggle favorite">★</button>
-            <h3>${station.name}</h3>
-            <p>${station.state}</p>
-            <p>ID: ${id}</p>
-          `;
-          card.addEventListener('click', event => {
-            if (event.target.closest('button')) return;
-            selectStation(id);
-          });
-          const button = card.querySelector('button');
-          button.addEventListener('click', event => {
-            event.stopPropagation();
-            toggleFavorite(id);
-          });
-          grid.appendChild(card);
+          grid.appendChild(buildStationCard(id));
         });
 
         container.appendChild(grid);
@@ -488,6 +528,50 @@
         return { highs, lows };
       }
 
+      function parsePredictionTime(t) {
+        // t format: 'YYYY-MM-DD HH:MM' (already local time from NOAA's lst_ldt)
+        const [datePart, timePart] = t.split(' ');
+        const [y, m, d] = datePart.split('-').map(Number);
+        const [hh, mm] = timePart.split(':').map(Number);
+        return new Date(y, m - 1, d, hh, mm);
+      }
+
+      function cosineEase(v1, v2, fraction) {
+        // Half-cosine easing: smooth S-curve from v1 to v2 as fraction goes 0 -> 1.
+        // This approximates the real shape of a tide transitioning between a
+        // high and a low, rather than a straight-line ramp.
+        const eased = (1 - Math.cos(fraction * Math.PI)) / 2;
+        return v1 * (1 - eased) + v2 * eased;
+      }
+
+      function buildSmoothCurve(predictions, samplesPerSegment = 24) {
+        const points = predictions
+          .map(p => ({ time: parsePredictionTime(p.t), value: parseFloat(p.v) }))
+          .filter(p => !isNaN(p.value))
+          .sort((a, b) => a.time - b.time);
+
+        if (points.length < 2) return points;
+
+        const curve = [];
+        for (let i = 0; i < points.length - 1; i++) {
+          const a = points[i];
+          const b = points[i + 1];
+          const isLastSegment = i === points.length - 2;
+          const steps = isLastSegment ? samplesPerSegment + 1 : samplesPerSegment;
+          for (let s = 0; s < steps; s++) {
+            const fraction = s / samplesPerSegment;
+            const time = new Date(a.time.getTime() + fraction * (b.time.getTime() - a.time.getTime()));
+            curve.push({ time, value: cosineEase(a.value, b.value, fraction) });
+          }
+        }
+        return curve;
+      }
+
+      function isSameLocalDate(date, dateString) {
+        const [y, m, d] = dateString.split('-').map(Number);
+        return date.getFullYear() === y && date.getMonth() === m - 1 && date.getDate() === d;
+      }
+
       function createChart(predictions, units) {
         const chartId = 'tideChart';
         return `
@@ -499,60 +583,92 @@
         `;
       }
 
-      function drawTideChart(predictions, units) {
+      function drawTideChart(contextPredictions, dayPredictions, units, dateValue) {
         const canvas = document.getElementById('tideChart');
         if (!canvas || !canvas.getContext) return;
         const ctx = canvas.getContext('2d');
         const width = canvas.width;
         const height = canvas.height;
         const padding = 40;
-        const times = predictions.map(prediction => formatPredictionTimeLocal(prediction.t));
-        const values = predictions.map(prediction => parseFloat(prediction.v));
+
+        // Build the smooth curve using the full fetched range (which includes
+        // a day of padding on either side from the server) so the curve isn't
+        // artificially flat right at midnight, then clip to the selected day.
+        const fullCurve = buildSmoothCurve(contextPredictions);
+        let dayCurve = fullCurve.filter(pt => isSameLocalDate(pt.time, dateValue));
+
+        // Fallback if, for some reason, no context was available.
+        if (!dayCurve.length) {
+          dayCurve = dayPredictions
+            .map(p => ({ time: parsePredictionTime(p.t), value: parseFloat(p.v) }))
+            .filter(p => !isNaN(p.value));
+        }
+
+        const dayStart = (() => {
+          const [y, m, d] = dateValue.split('-').map(Number);
+          return new Date(y, m - 1, d, 0, 0, 0);
+        })();
+        const dayLengthMs = 24 * 60 * 60 * 1000;
+
+        const values = dayCurve.map(pt => pt.value);
         const minValue = Math.min(...values);
         const maxValue = Math.max(...values);
         const range = maxValue - minValue || 1;
+
+        const xForTime = time => padding + ((time.getTime() - dayStart.getTime()) / dayLengthMs) * (width - padding * 2);
+        const yForValue = value => height - padding - ((value - minValue) / range) * (height - padding * 2);
 
         ctx.clearRect(0, 0, width, height);
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(0, 0, width, height);
 
-        ctx.strokeStyle = '#d3e0ff';
-        ctx.lineWidth = 1;
+        // Smooth filled area under the curve for a "water level" feel.
         ctx.beginPath();
-        for (let i = 0; i < values.length; i++) {
-          const x = padding + (i / (values.length - 1)) * (width - padding * 2);
-          const y = height - padding - ((values[i] - minValue) / range) * (height - padding * 2);
+        dayCurve.forEach((pt, i) => {
+          const x = xForTime(pt.time);
+          const y = yForValue(pt.value);
           if (i === 0) ctx.moveTo(x, y);
           else ctx.lineTo(x, y);
-        }
-        ctx.stroke();
+        });
+        ctx.lineTo(xForTime(dayCurve[dayCurve.length - 1].time), height - padding);
+        ctx.lineTo(xForTime(dayCurve[0].time), height - padding);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(17, 97, 209, 0.08)';
+        ctx.fill();
 
+        // The smooth tide curve itself.
         ctx.strokeStyle = '#1161d1';
         ctx.lineWidth = 2;
         ctx.beginPath();
-        for (let i = 0; i < values.length; i++) {
-          const x = padding + (i / (values.length - 1)) * (width - padding * 2);
-          const y = height - padding - ((values[i] - minValue) / range) * (height - padding * 2);
+        dayCurve.forEach((pt, i) => {
+          const x = xForTime(pt.time);
+          const y = yForValue(pt.value);
           if (i === 0) ctx.moveTo(x, y);
           else ctx.lineTo(x, y);
-        }
+        });
         ctx.stroke();
 
+        // Markers only at the actual high/low tide events for this day.
+        const { highs, lows } = findDailyHighsLows(dayPredictions);
         ctx.fillStyle = '#1161d1';
-        values.forEach((value, i) => {
-          const x = padding + (i / (values.length - 1)) * (width - padding * 2);
-          const y = height - padding - ((value - minValue) / range) * (height - padding * 2);
+        [...highs, ...lows].forEach(tide => {
+          const time = parsePredictionTime(tide.t);
+          const x = xForTime(time);
+          const y = yForValue(parseFloat(tide.v));
           ctx.beginPath();
           ctx.arc(x, y, 4, 0, Math.PI * 2);
           ctx.fill();
         });
 
+        // Time-of-day axis labels, every 3 hours.
         ctx.fillStyle = '#4a5568';
         ctx.font = '12px Arial';
         ctx.textAlign = 'center';
-        for (let i = 0; i < times.length; i += Math.max(1, Math.floor(times.length / 8))) {
-          const x = padding + (i / (values.length - 1)) * (width - padding * 2);
-          ctx.fillText(times[i], x, height - padding + 20);
+        for (let hour = 0; hour <= 24; hour += 3) {
+          const labelTime = new Date(dayStart.getTime() + hour * 60 * 60 * 1000);
+          const x = xForTime(labelTime);
+          const label = hour === 24 ? '24:00' : labelTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          ctx.fillText(label, x, height - padding + 20);
         }
 
         ctx.textAlign = 'right';
@@ -560,7 +676,7 @@
         ctx.fillText(`${maxValue.toFixed(2)} ${units === 'metric' ? 'm' : 'ft'}`, width - 8, padding - 8);
       }
 
-      function renderPredictions(station, predictions, units) {
+      function renderPredictions(station, predictions, allPredictions, units, dateValue) {
         if (!predictions || predictions.length === 0) {
           resultsEl.innerHTML = '<p>No tide data was returned for this selection.</p>';
           return;
@@ -601,7 +717,7 @@
         `;
 
         resultsEl.innerHTML = summaryHtml + createChart(predictions, units);
-        drawTideChart(predictions, units);
+        drawTideChart(allPredictions, predictions, units, dateValue);
       }
 
       async function loadTides() {
@@ -641,7 +757,7 @@
 
           const stationName = data.station?.name || 'Selected station';
           infoEl.textContent = `Showing tide predictions for ${stationName} on ${dateValue}.`;
-          renderPredictions(data.station, filteredPredictions, units);
+          renderPredictions(data.station, filteredPredictions, data.predictions, units, dateValue);
         } catch (err) {
           errorEl.textContent = 'Network error while loading tide data.';
         } finally {
@@ -649,6 +765,12 @@
           loadButton.textContent = 'Load Tides';
         }
       }
+
+      function applyBackground() {
+        bgLayer.style.backgroundImage = SITE_BACKGROUND_IMAGE_URL ? `url("${SITE_BACKGROUND_IMAGE_URL}")` : 'none';
+        bgLayer.style.opacity = SITE_BACKGROUND_IMAGE_URL ? SITE_BACKGROUND_OPACITY : 0;
+      }
+      applyBackground();
 
       stationSearch.addEventListener('input', () => renderStationCards(stationSearch.value));
       stationSelect.addEventListener('change', () => {
