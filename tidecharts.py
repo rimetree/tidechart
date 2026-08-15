@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 import json
 import time
+from typing import Optional
 
 app = Flask(__name__)
 CORS(app)
@@ -18,6 +19,10 @@ ALLOWED_STATES = ["NH", "ME", "MA"]
 # No custom headers needed - NOAA accepts the default python-requests user-agent.
 # Spoofed browser headers (User-Agent, Referer) cause 403 responses from NOAA.
 NOAA_REQUEST_HEADERS = {}
+
+# Reuse a single requests.Session to reduce connection overhead
+NOAA_SESSION = requests.Session()
+NOAA_SESSION.headers.update(NOAA_REQUEST_HEADERS)
 
 # NOAA intermittently returns a 403 (and occasionally 429/5xx) even for
 # perfectly valid, unthrottled requests - it seems to be transient flakiness
@@ -49,7 +54,7 @@ def fetch_noaa_json(url, params=None, max_attempts=5, request_timeout=8, base_ba
 
     for attempt in range(max_attempts):
         try:
-            response = requests.get(url, params=params, headers=NOAA_REQUEST_HEADERS, timeout=request_timeout)
+            response = NOAA_SESSION.get(url, params=params, timeout=request_timeout)
         except requests.exceptions.RequestException as e:
             last_error = str(e)
             last_status = 502
@@ -96,7 +101,8 @@ def station_has_predictions(station_id, date_to_check):
         'begin_date': date_to_check,
         'end_date': date_to_check
     }
-    data, error_message, _ = fetch_noaa_json(NOAA_API_BASE, params=params, max_attempts=3)
+    # Use shorter timeouts/retries for per-station checks to avoid long blocking
+    data, error_message, _ = fetch_noaa_json(NOAA_API_BASE, params=params, max_attempts=2, request_timeout=4)
     if error_message:
         return False
     return 'predictions' in data and bool(data['predictions'])
@@ -107,7 +113,8 @@ def fetch_noaa_stations():
     if _station_cache is not None:
         return _station_cache
 
-    data, error_message, _ = fetch_noaa_json(NOAA_STATIONS_METADATA_URL, max_attempts=3)
+    # Fetch stations metadata with conservative timeouts/retries so startup isn't long
+    data, error_message, _ = fetch_noaa_json(NOAA_STATIONS_METADATA_URL, max_attempts=2, request_timeout=5)
     if error_message:
         print(f"[tidecharts] WARNING: Failed to fetch NOAA station metadata: {error_message}. Falling back to static station list.")
         _station_cache = STATIC_NOAA_STATIONS.copy()
@@ -117,7 +124,10 @@ def fetch_noaa_stations():
         state_rank = {state: idx for idx, state in enumerate(ALLOWED_STATES)}
         items = []
 
-        for station in data.get('stations', []):
+        stations_list = data.get('stations', []) if isinstance(data, dict) else []
+        print(f"[tidecharts] NOAA stations metadata returned {len(stations_list)} stations")
+
+        for station in stations_list:
             state = station.get('state')
             if state not in ALLOWED_STATES:
                 continue
@@ -131,22 +141,36 @@ def fetch_noaa_stations():
             _station_cache = STATIC_NOAA_STATIONS.copy()
             return _station_cache
 
+        # Trim very large lists to a reasonable size to avoid long-running checks
+        if len(items) > 200:
+            print(f"[tidecharts] Trimming station list from {len(items)} to 200 to avoid long startup time")
+            items = items[:200]
+
         today = datetime.now().date()
         check_date = today.strftime('%Y%m%d')
 
         valid_stations = {}
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            future_to_station = {
-                executor.submit(station_has_predictions, station_id, check_date): (station_id, state, name)
-                for _, name, station_id, state in items
-            }
-            for future in as_completed(future_to_station):
-                station_id, state, name = future_to_station[future]
-                try:
-                    if future.result():
-                        valid_stations[station_id] = {"name": name, "state": state}
-                except Exception:
-                    continue
+
+        # Avoid submitting thousands of futures at once (can OOM on small containers).
+        # Process station checks in batches, keeping a small number of outstanding futures.
+        batch_size = 50
+        max_workers = 5
+        print(f"[tidecharts] Stations metadata contains {len(items)} entries; checking in batches of {batch_size} with {max_workers} workers")
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for i in range(0, len(items), batch_size):
+                batch = items[i:i+batch_size]
+                future_to_station = {
+                    executor.submit(station_has_predictions, station_id, check_date): (station_id, state, name)
+                    for _, name, station_id, state in batch
+                }
+                for future in as_completed(future_to_station):
+                    station_id, state, name = future_to_station[future]
+                    try:
+                        if future.result():
+                            valid_stations[station_id] = {"name": name, "state": state}
+                    except Exception:
+                        # Fail individual station checks silently; proceed with others
+                        continue
 
         if not valid_stations:
             valid_stations = STATIC_NOAA_STATIONS.copy()
