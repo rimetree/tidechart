@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Tide Charts</title>
+    <title>New England Tide Charts</title>
     <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
     <link rel="shortcut icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
     <style>
@@ -30,7 +30,10 @@
         font-weight: 600;
       }
       select, input[type="date"], input[type="search"], button {
-        width: 100%;
+        width: 100% !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
+        box-sizing: border-box;
         padding: 10px 12px;
         border: 1px solid #d3dce6;
         border-radius: 8px;
@@ -54,12 +57,27 @@
       .form-row {
         display: grid;
         gap: 16px;
+        align-items: end;
+      }
+      .form-row > div {
+        min-width: 0;
+        width: 100%;
+        display: flex;
+        flex-direction: column;
       }
       .row-2 {
-        grid-template-columns: 1fr 1fr;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
       }
       .row-3 {
-        grid-template-columns: 1fr 1fr 1fr;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+      .row-3 > div > * {
+        width: 100%;
+      }
+      @media (max-width: 720px) {
+        .row-3 {
+          grid-template-columns: 1fr;
+        }
       }
       .station-section {
         margin-top: 24px;
@@ -211,7 +229,7 @@
   <body>
     <div id="bgLayer" class="bg-layer"></div>
     <div class="container">
-      <h1>Tide Charts</h1>
+      <h1>New England Tide Charts</h1>
       <p>Search stations, flag favorites, and use the top New England stations for quick tide lookup.</p>
 
       <div class="form-row">
@@ -233,8 +251,8 @@
             <option value="english" selected>English (ft)</option>
           </select>
         </div>
-        <div style="display:flex; flex-direction:column; justify-content:flex-end; gap:6px;">
-          <span class="small-note">Select a station or click a favorite card.</span>
+        <div style="display:flex; flex-direction:column; justify-content:flex-end; gap:6px; min-width:0;">
+          <span class="small-note" style="display:block;">Select a station or click a favorite card.</span>
           <button id="loadTides" style="width:100%;">Load Tides</button>
         </div>
       </div>
